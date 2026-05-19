@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 pub async fn run(
     config: Config,
     db: Database,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: mpsc::Sender<(Event, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(
         "Stage 1: Starting event collection from {} relays (concurrency: {})",
@@ -82,7 +82,7 @@ async fn sync_relay(
     relay_url: &str,
     config: &Config,
     db: &Database,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: mpsc::Sender<(Event, String)>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     info!("Syncing relay: {}", relay_url);
 
@@ -111,7 +111,7 @@ async fn backfill_relay(
     relay_url: &str,
     config: &Config,
     db: &Database,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: mpsc::Sender<(Event, String)>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::default();
     client.add_relay(relay_url).await?;
@@ -169,7 +169,7 @@ async fn backfill_relay(
             // Move cursor backward, subtract 1 to avoid fetching the same event twice
             // (because .until() is inclusive in Nostr protocol: created_at <= until)
             until = Timestamp::from(event.created_at.as_u64().saturating_sub(1));
-            if let Err(e) = event_tx.send(event).await {
+            if let Err(e) = event_tx.send((event, relay_url.to_string())).await {
                 warn!("Failed to send event to Stage 2: {}", e);
                 break;
             }
@@ -201,7 +201,7 @@ async fn fetch_new_events(
     since: i64,
     _config: &Config,
     db: &Database,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: mpsc::Sender<(Event, String)>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::default();
     client.add_relay(relay_url).await?;
@@ -236,7 +236,7 @@ async fn fetch_new_events(
             latest_timestamp = ts;
         }
 
-        if let Err(e) = event_tx.send(event).await {
+        if let Err(e) = event_tx.send((event, relay_url.to_string())).await {
             warn!("Failed to send event to Stage 2: {}", e);
             break;
         }

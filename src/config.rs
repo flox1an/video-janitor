@@ -24,6 +24,7 @@ pub struct Config {
     pub backfill_batch_size: usize,
     pub backfill_max_events: usize,
     pub relay_concurrency: usize,
+    pub related_events_batch_size: usize,
 }
 
 fn is_valid_relay_url(url: &str) -> bool {
@@ -155,6 +156,13 @@ impl Config {
                 ConfigError::InvalidValue("RELAY_CONCURRENCY".to_string(), e.to_string())
             })?;
 
+        let related_events_batch_size = env::var("RELATED_EVENTS_BATCH_SIZE")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse::<usize>()
+            .map_err(|e: std::num::ParseIntError| {
+                ConfigError::InvalidValue("RELATED_EVENTS_BATCH_SIZE".to_string(), e.to_string())
+            })?;
+
         Ok(Config {
             database_url,
             source_relays,
@@ -166,6 +174,7 @@ impl Config {
             backfill_batch_size,
             backfill_max_events,
             relay_concurrency,
+            related_events_batch_size,
         })
     }
 }

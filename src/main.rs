@@ -6,6 +6,7 @@ mod stage1_collection;
 mod stage2_processing;
 mod stage3_validation;
 mod stage4_filter_generation;
+mod stage5_related_events;
 
 use clap::Parser;
 use config::Config;

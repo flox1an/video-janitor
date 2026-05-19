@@ -8,3 +8,4 @@ pub mod stage1_collection;
 pub mod stage2_processing;
 pub mod stage3_validation;
 pub mod stage4_filter_generation;
+pub mod stage5_related_events;
