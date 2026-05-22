@@ -1,2 +1,4 @@
 /target
 .env
+failed_events_filter.json
+package-lock.json
