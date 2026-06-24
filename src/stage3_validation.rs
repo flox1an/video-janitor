@@ -4,6 +4,7 @@ use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -21,7 +22,9 @@ pub async fn run(
     );
 
     // Fetch all pending URLs from database
-    let pending_urls = db.get_pending_urls().await?;
+    let pending_urls = db
+        .get_pending_urls(config.url_check_max_retries as i32)
+        .await?;
 
     if pending_urls.is_empty() {
         info!("Stage 3: No pending URLs to validate");
@@ -36,6 +39,12 @@ pub async fn run(
         .build()?;
 
     let checked = Arc::new(AtomicUsize::new(0));
+    let available = Arc::new(AtomicUsize::new(0));
+    let not_found = Arc::new(AtomicUsize::new(0));
+    let server_error = Arc::new(AtomicUsize::new(0));
+    let timed_out = Arc::new(AtomicUsize::new(0));
+    // Track recent errors for context in progress logs
+    let last_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     stream::iter(pending_urls)
         .for_each_concurrent(config.url_check_concurrency, |(url_id, url)| {
@@ -43,6 +52,11 @@ pub async fn run(
             let client = http_client.clone();
             let delay_ms = config.url_check_delay_ms;
             let checked = checked.clone();
+            let available = available.clone();
+            let not_found = not_found.clone();
+            let server_error = server_error.clone();
+            let timed_out = timed_out.clone();
+            let last_errors = last_errors.clone();
 
             async move {
                 debug!("Checking URL: {}", url);
@@ -63,6 +77,23 @@ pub async fn run(
                     Err(e) => ("server_error", None, Some(e.to_string())),
                 };
 
+                match status {
+                    "available" => { available.fetch_add(1, Ordering::Relaxed); }
+                    "not_found" => { not_found.fetch_add(1, Ordering::Relaxed); }
+                    "server_error" => {
+                        server_error.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref msg) = error_msg {
+                            if let Ok(mut errs) = last_errors.lock() {
+                                if errs.len() < 3 {
+                                    errs.push(format!("{}: {}", url, msg));
+                                }
+                            }
+                        }
+                    }
+                    "timeout" => { timed_out.fetch_add(1, Ordering::Relaxed); }
+                    _ => {}
+                }
+
                 if let Err(e) = db
                     .update_url_status(url_id, status, http_code, error_msg.as_deref())
                     .await
@@ -81,7 +112,15 @@ pub async fn run(
 
                 let n = checked.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % 50 == 0 {
-                    info!("Stage 3: {}/{} URLs checked", n, total_urls);
+                    let pct = n * 100 / total_urls;
+                    info!(
+                        "Stage 3: {}/{} URLs checked ({}%) — ok={}, not_found={}, err={}, timeout={}",
+                        n, total_urls, pct,
+                        available.load(Ordering::Relaxed),
+                        not_found.load(Ordering::Relaxed),
+                        server_error.load(Ordering::Relaxed),
+                        timed_out.load(Ordering::Relaxed),
+                    );
                 }
 
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -89,7 +128,15 @@ pub async fn run(
         })
         .await;
 
-    info!("Stage 3: URL validation completed");
+    let total_checked = checked.load(Ordering::Relaxed);
+    let ok = available.load(Ordering::Relaxed);
+    let nf = not_found.load(Ordering::Relaxed);
+    let se = server_error.load(Ordering::Relaxed);
+    let to = timed_out.load(Ordering::Relaxed);
+    info!(
+        "Stage 3: URL validation completed — {}/{} checked: {} available, {} not_found, {} server_error, {} timeout",
+        total_checked, total_urls, ok, nf, se, to
+    );
 
     Ok(())
 }

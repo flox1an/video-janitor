@@ -2,6 +2,7 @@
 pub mod config;
 pub mod db;
 pub mod parser;
+pub mod relay_access;
 
 // Pipeline stages
 pub mod stage1_collection;

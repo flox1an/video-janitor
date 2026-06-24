@@ -62,6 +62,73 @@ pub fn extract_video_urls(event: &Event) -> Vec<VideoUrl> {
     urls
 }
 
+/// Extract NIP-92/NIP-94 `x` and `ox` hashes from video `imeta` tags.
+///
+/// Hashes are only returned for `imeta` entries whose MIME type starts with `video/`.
+pub fn extract_video_hashes(event: &Event) -> Vec<String> {
+    let mut hashes = Vec::new();
+
+    for tag in event.tags.iter() {
+        let tag_vec = tag.as_slice();
+
+        if tag_vec.is_empty() || tag_vec[0] != "imeta" {
+            continue;
+        }
+
+        let mut mime_type: Option<&str> = None;
+        let mut tag_hashes = Vec::new();
+
+        for entry in tag_vec.iter().skip(1).map(|field| field.as_str()) {
+            if let Some(space_pos) = entry.find(' ') {
+                let key = &entry[..space_pos];
+                let value = &entry[space_pos + 1..];
+
+                match key {
+                    "m" => mime_type = Some(value),
+                    "x" | "ox" if !value.is_empty() => tag_hashes.push(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+
+        if mime_type.is_some_and(|m| m.starts_with("video/")) {
+            hashes.extend(tag_hashes);
+        }
+    }
+
+    hashes.sort();
+    hashes.dedup();
+    hashes
+}
+
+/// Extract the NIP-40 expiration timestamp from an event's tags, if present.
+///
+/// Returns `None` when there is no `expiration` tag or the value is not a valid i64.
+pub fn extract_expiration(event: &Event) -> Option<chrono::DateTime<chrono::Utc>> {
+    for tag in event.tags.iter() {
+        let v = tag.as_slice();
+        if v.len() >= 2 && v[0] == "expiration" {
+            if let Ok(ts) = v[1].parse::<i64>() {
+                return chrono::DateTime::from_timestamp(ts, 0);
+            }
+        }
+    }
+    None
+}
+
+/// Extract the `d` tag identifier from an addressable event (kinds 34235/34236).
+///
+/// Returns a `&str` borrowed from the event's tag storage, or `None` if absent.
+pub fn extract_d_tag(event: &Event) -> Option<&str> {
+    for tag in event.tags.iter() {
+        let v = tag.as_slice();
+        if v.len() >= 2 && v[0] == "d" {
+            return Some(v[1].as_str());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +185,44 @@ mod tests {
         let urls = extract_video_urls(&event);
 
         assert_eq!(urls.len(), 0); // No video URLs
+    }
+
+    #[test]
+    fn test_extract_video_hashes() {
+        let keys = Keys::generate();
+
+        let event = EventBuilder::new(
+            Kind::from(34235),
+            "Test video event",
+            vec![
+                Tag::parse(&[
+                    "imeta",
+                    "url https://example.com/video.mp4",
+                    "m video/mp4",
+                    "x 1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff",
+                    "ox aaaabbbbccccddddeeeeffff1111222233334444555566667777888899990000",
+                ])
+                .unwrap(),
+                Tag::parse(&[
+                    "imeta",
+                    "url https://example.com/thumb.jpg",
+                    "m image/jpeg",
+                    "x ffff222233334444555566667777888899990000aaaabbbbccccddddeeee1111",
+                ])
+                .unwrap(),
+            ],
+        )
+        .to_event(&keys)
+        .unwrap();
+
+        let hashes = extract_video_hashes(&event);
+
+        assert_eq!(
+            hashes,
+            vec![
+                "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff",
+                "aaaabbbbccccddddeeeeffff1111222233334444555566667777888899990000",
+            ]
+        );
     }
 }

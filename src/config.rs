@@ -12,6 +12,12 @@ pub enum ConfigError {
     RelayFileError(String, String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    Full,
+    Incremental,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -25,6 +31,8 @@ pub struct Config {
     pub backfill_max_events: usize,
     pub relay_concurrency: usize,
     pub related_events_batch_size: usize,
+    pub url_check_max_retries: usize,
+    pub sync_mode: SyncMode,
 }
 
 fn is_valid_relay_url(url: &str) -> bool {
@@ -163,6 +171,21 @@ impl Config {
                 ConfigError::InvalidValue("RELATED_EVENTS_BATCH_SIZE".to_string(), e.to_string())
             })?;
 
+        let url_check_max_retries = env::var("URL_CHECK_MAX_RETRIES")
+            .unwrap_or_else(|_| "3".to_string())
+            .parse::<usize>()
+            .map_err(|e: std::num::ParseIntError| {
+                ConfigError::InvalidValue("URL_CHECK_MAX_RETRIES".to_string(), e.to_string())
+            })?;
+
+        let sync_mode = match env::var("SYNC_MODE") {
+            Ok(val) => match val.to_lowercase().as_str() {
+                "full" => SyncMode::Full,
+                _ => SyncMode::Incremental,
+            },
+            Err(_) => SyncMode::Incremental,
+        };
+
         Ok(Config {
             database_url,
             source_relays,
@@ -175,6 +198,59 @@ impl Config {
             backfill_max_events,
             relay_concurrency,
             related_events_batch_size,
+            url_check_max_retries,
+            sync_mode,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_mode_parsing() {
+        // Backup existing env vars to restore later
+        let old_db = std::env::var("DATABASE_URL").ok();
+        let old_source = std::env::var("SOURCE_RELAYS").ok();
+        let old_source_file = std::env::var("SOURCE_RELAYS_FILE").ok();
+        let old_target = std::env::var("TARGET_RELAYS").ok();
+        let old_sync = std::env::var("SYNC_MODE").ok();
+
+        std::env::set_var("DATABASE_URL", "postgresql://localhost/db");
+        std::env::set_var("SOURCE_RELAYS", "wss://relay.damus.io");
+        std::env::set_var("TARGET_RELAYS", "wss://relay.nostr.band");
+        std::env::remove_var("SOURCE_RELAYS_FILE");
+
+        std::env::set_var("SYNC_MODE", "full");
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.sync_mode, SyncMode::Full);
+
+        std::env::set_var("SYNC_MODE", "incremental");
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.sync_mode, SyncMode::Incremental);
+
+        std::env::remove_var("SYNC_MODE");
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.sync_mode, SyncMode::Incremental);
+
+        // Restore environment
+        if let Some(val) = old_db {
+            std::env::set_var("DATABASE_URL", val);
+        }
+        if let Some(val) = old_source {
+            std::env::set_var("SOURCE_RELAYS", val);
+        }
+        if let Some(val) = old_source_file {
+            std::env::set_var("SOURCE_RELAYS_FILE", val);
+        }
+        if let Some(val) = old_target {
+            std::env::set_var("TARGET_RELAYS", val);
+        }
+        if let Some(val) = old_sync {
+            std::env::set_var("SYNC_MODE", val);
+        } else {
+            std::env::remove_var("SYNC_MODE");
+        }
     }
 }

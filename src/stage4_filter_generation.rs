@@ -32,13 +32,15 @@ struct FilterOutput {
 /// builds a BinaryFuse16 filter from the event IDs, and writes it to disk
 /// as a base64-encoded JSON file.
 pub async fn run(
-    _config: Config,
+    config: Config,
     db: Database,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Stage 4: Starting filter generation for fully failed events");
 
     // Fetch all event IDs where all URLs have failed
-    let failed_event_ids = db.get_fully_failed_event_ids().await?;
+    let failed_event_ids = db
+        .get_fully_failed_event_ids(config.url_check_max_retries as i32)
+        .await?;
 
     if failed_event_ids.is_empty() {
         info!("Stage 4: No fully failed events found");

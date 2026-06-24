@@ -5,10 +5,19 @@ CREATE TABLE IF NOT EXISTS event_relations (
     video_event_id    TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
     relation_type     TEXT NOT NULL CHECK (relation_type IN (
                         'reaction', 'comment', 'note', 'delete',
-                        'zap_request', 'zap_receipt'
+                        'label', 'zap_request', 'zap_receipt',
+                        'file_metadata'
                       )),
     PRIMARY KEY (related_event_id, video_event_id)
 );
+
+ALTER TABLE event_relations DROP CONSTRAINT IF EXISTS event_relations_relation_type_check;
+ALTER TABLE event_relations ADD CONSTRAINT event_relations_relation_type_check
+    CHECK (relation_type IN (
+        'reaction', 'comment', 'note', 'delete',
+        'label', 'zap_request', 'zap_receipt',
+        'file_metadata'
+    ));
 
 CREATE INDEX IF NOT EXISTS idx_event_relations_video_id ON event_relations(video_event_id);
 

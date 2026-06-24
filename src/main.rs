@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod parser;
 mod pipeline;
+mod relay_access;
 mod stage1_collection;
 mod stage2_processing;
 mod stage3_validation;
@@ -12,6 +13,7 @@ use clap::Parser;
 use config::Config;
 use db::Database;
 use nostr_sdk::{Client, Event};
+use std::collections::HashMap;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -27,6 +29,14 @@ struct Args {
     /// Re-publish all events from the local database to the target relays
     #[arg(long)]
     republish: bool,
+
+    /// Run only Stage 5: fetch related events (reactions, zaps, comments, deletes) for stored video events
+    #[arg(long)]
+    related_events: bool,
+
+    /// Sync mode: "full" or "incremental"
+    #[arg(long)]
+    mode: Option<String>,
 }
 
 #[tokio::main]
@@ -44,7 +54,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Load configuration
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
+
+    // Override sync mode from CLI if provided
+    if let Some(ref mode_str) = args.mode {
+        config.sync_mode = match mode_str.to_lowercase().as_str() {
+            "full" => config::SyncMode::Full,
+            "incremental" => config::SyncMode::Incremental,
+            other => {
+                return Err(Box::from(format!(
+                    "Invalid sync mode: {}. Allowed values: full, incremental",
+                    other
+                )));
+            }
+        };
+    }
 
     // Connect to database
     info!("Connecting to database...");
@@ -56,6 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.republish {
         run_republish(config, db).await?;
+    } else if args.related_events {
+        run_related_events(config, db).await?;
     } else if args.daemon {
         run_daemon(config, db).await?;
     } else {
@@ -149,20 +175,47 @@ async fn run_daemon(config: Config, db: Database) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+async fn run_related_events(
+    config: Config,
+    db: Database,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Running Stage 5 only: related events collection");
+
+    let start = std::time::Instant::now();
+
+    match stage5_related_events::run(config, db).await {
+        Ok(_) => {
+            info!("Stage 5 completed successfully in {:?}", start.elapsed());
+            Ok(())
+        }
+        Err(e) => {
+            error!("Stage 5 failed: {}", e);
+            Err(Box::from(format!("{}", e)))
+        }
+    }
+}
+
 async fn run_republish(config: Config, db: Database) -> Result<(), Box<dyn std::error::Error>> {
     info!("Re-publish mode: loading all events from database...");
+
+    for relay in &config.target_relays {
+        db.upsert_relay(relay, "target").await?;
+    }
+    let mut active_target_relays = db
+        .get_write_enabled_relay_urls(&config.target_relays)
+        .await?;
 
     let raw_events = db.get_all_raw_events().await?;
     let total = raw_events.len();
     info!(
         "Found {} events in database, publishing to {} target relay(s): {}",
         total,
-        config.target_relays.len(),
-        config.target_relays.join(", ")
+        active_target_relays.len(),
+        active_target_relays.join(", ")
     );
 
     let client = Client::default();
-    for relay in &config.target_relays {
+    for relay in &active_target_relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;
@@ -180,22 +233,31 @@ async fn run_republish(config: Config, db: Database) -> Result<(), Box<dyn std::
             }
         };
 
-        match client.send_event(event).await {
-            Ok(_) => {
-                success += 1;
-                if success % 50 == 0 {
-                    info!(
-                        "[{}/{}] Published {} events so far...",
-                        i + 1,
-                        total,
-                        success
-                    );
-                }
+        let event_id_hex = event.id.to_hex();
+        let success_count = relay_access::send_event_to_write_relays(
+            &db,
+            &client,
+            &mut active_target_relays,
+            &HashMap::new(),
+            &event,
+            &event_id_hex,
+            "Re-publish",
+        )
+        .await;
+
+        if success_count > 0 {
+            success += 1;
+            if success % 50 == 0 {
+                info!(
+                    "[{}/{}] Published {} events so far...",
+                    i + 1,
+                    total,
+                    success
+                );
             }
-            Err(e) => {
-                warn!("[{}/{}] Failed to publish event: {}", i + 1, total, e);
-                failed += 1;
-            }
+        } else {
+            warn!("[{}/{}] Failed to publish event", i + 1, total);
+            failed += 1;
         }
     }
 
